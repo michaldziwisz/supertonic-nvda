@@ -52,6 +52,10 @@ ignore = [
 # sconstruct contains many inbuilt functions not recognised by the lint,
 # so ignore F821.
 "sconstruct" = ["F821"]
+# The synth driver must extend sys.path to the bundled libs directory before
+# importing the vendored `supertonic` package, so module-level imports
+# intentionally come after that path manipulation.
+"addon/synthDrivers/supertonic.py" = ["E402"]
 
 [tool.pyright]
 pythonPlatform = "Windows"

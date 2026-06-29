@@ -2,50 +2,60 @@ name: build addon
 
 on:
   push:
-    tags: ["*"]
-    # To build on main/master branch, uncomment the following line:
-    # branches: [ main , master ]
-
+    tags: ["v*"]
   pull_request:
-    branches: [ main, master ]
-
+    branches: [main, master]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v7
+      - name: Checkout (with Git LFS model files)
+        uses: actions/checkout@v4
+        with:
+          # The ONNX model lives in Git LFS. Without this the build would
+          # package LFS pointer stubs instead of the real model and the
+          # resulting add-on would not work.
+          lfs: true
 
-    - run: echo -e "pre-commit\nscons\nmarkdown">requirements.txt
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
 
-    - name: Set up Python
-      uses: actions/setup-python@v6
-      with:
-        python-version: 3.11
-        cache: 'pip'
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip wheel
+          pip install scons markdown ruff
+          sudo apt-get update -y
+          sudo apt-get install -y gettext
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip wheel
-        pip install -r requirements.txt
-        sudo apt-get update  -y
-        sudo apt-get install -y gettext
+      - name: Lint our own sources with ruff
+        # Vendored third-party code under synthDrivers/libs is intentionally
+        # not linted. We only gate on the files this add-on actually owns.
+        run: |
+          ruff check \
+            addon/synthDrivers/supertonic.py \
+            addon/synthDrivers/_supertonicVoices.py \
+            addon/globalPlugins/supertonic.py \
+            buildVars.py
 
-    - name: Code checks
-      run: export SKIP=no-commit-to-branch; pre-commit run --all
+      - name: Build add-on
+        run: scons && scons pot
 
-    - name: building addon
-      run: scons && scons pot
-
-    - uses: actions/upload-artifact@v7
-      with:
-        name: packaged_addon
-        path: |
-          ./*.nvda-addon
-          ./*.pot
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaged_addon
+          path: |
+            ./*.nvda-addon
+            ./*.pot
 
   upload_release:
     runs-on: ubuntu-latest
@@ -54,22 +64,26 @@ jobs:
     permissions:
       contents: write
     steps:
-    - uses: actions/checkout@v7
-    - name: download releases files
-      uses: actions/download-artifact@v8
-    - name: Display structure of downloaded files
-      run: ls -R
-    - name: Calculate sha256
-      run: |
-        echo -e "\nSHA256: " >> changelog.md
-        sha256sum *.nvda-addon >> changelog.md
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Release
-      uses: softprops/action-gh-release@v3
-      with:
-        files: |
-          *.nvda-addon
-          *.pot
-        body_path: changelog.md
-        fail_on_unmatched_files: true
-        prerelease: ${{ contains(github.ref, '-') }}
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Display structure of downloaded files
+        run: ls -R
+
+      - name: Calculate sha256
+        run: |
+          echo -e "\nSHA256: " >> changelog.md
+          sha256sum packaged_addon/*.nvda-addon >> changelog.md
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            packaged_addon/*.nvda-addon
+            packaged_addon/*.pot
+          body_path: changelog.md
+          fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref, '-') }}
