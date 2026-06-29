@@ -27,9 +27,11 @@ if _LIBS_PATH not in sys.path:
 	sys.path.insert(0, _LIBS_PATH)
 
 # Hugging Face source of the official voices. Kept in sync with
-# ``supertonic.config`` (DEFAULT_MODEL_REPO / DEFAULT_MODEL_REVISION).
-HF_REPO_ID = "Supertone/supertonic"
-HF_REVISION = "v1.0.0"
+# ``supertonic.config`` (MODEL_CONFIGS["supertonic-3"]). We pin the same commit
+# SHA the vendored library (1.3.x) was tested against, so the downloaded voices
+# match the bundled multilingual model exactly.
+HF_REPO_ID = "Supertone/supertonic-3"
+HF_REVISION = "724fb5abbf5502583fb520898d45929e62f02c0b"
 # Sub-directory inside the HF repo (and inside our user directory) holding voices.
 VOICE_SUBDIR = "voice_styles"
 
@@ -223,3 +225,77 @@ def is_ready() -> bool:
 	for selection while it has no usable voice.
 	"""
 	return model_present() and len(list_installed_voices()) > 0
+
+
+# ---------------------------------------------------------------------------
+# Language support (supertonic-3: 31 languages + "na" fallback)
+# ---------------------------------------------------------------------------
+
+# The 31 languages supported by the supertonic-3 model, keyed by ISO 639-1 code.
+# Mirrors supertonic.config.SUPPORTED_LANGUAGES. The value is an English display
+# name used as a fallback when NVDA cannot describe the locale itself.
+SUPPORTED_LANGUAGES = {
+	"en": "English",
+	"ko": "Korean",
+	"ja": "Japanese",
+	"ar": "Arabic",
+	"bg": "Bulgarian",
+	"cs": "Czech",
+	"da": "Danish",
+	"de": "German",
+	"el": "Greek",
+	"es": "Spanish",
+	"et": "Estonian",
+	"fi": "Finnish",
+	"fr": "French",
+	"hi": "Hindi",
+	"hr": "Croatian",
+	"hu": "Hungarian",
+	"id": "Indonesian",
+	"it": "Italian",
+	"lt": "Lithuanian",
+	"lv": "Latvian",
+	"nl": "Dutch",
+	"pl": "Polish",
+	"pt": "Portuguese",
+	"ro": "Romanian",
+	"ru": "Russian",
+	"sk": "Slovak",
+	"sl": "Slovenian",
+	"sv": "Swedish",
+	"tr": "Turkish",
+	"uk": "Ukrainian",
+	"vi": "Vietnamese",
+}
+
+# Fallback language code for text whose language is unknown or unsupported.
+# supertonic-3 understands the special "na" token for this case.
+UNKNOWN_LANGUAGE = "na"
+
+DEFAULT_LANGUAGE = "en"
+
+
+def normalize_lang(locale):
+	"""Map an NVDA locale string to a supertonic language code.
+
+	NVDA passes locales like ``"pl"``, ``"pl_PL"``, ``"en_US"`` or ``None``.
+	We reduce to the base ISO 639-1 code and check it against the supported set.
+	Returns a supported code (e.g. ``"pl"``) or ``UNKNOWN_LANGUAGE`` ("na") when
+	the language is outside the model's 31-language set. ``None`` input yields
+	``None`` so callers can decide on their own default.
+	"""
+	if not locale:
+		return None
+	base = str(locale).replace("-", "_").split("_")[0].lower()
+	if base in SUPPORTED_LANGUAGES:
+		return base
+	return UNKNOWN_LANGUAGE
+
+
+def available_locales():
+	"""Locale codes to advertise to NVDA via ``availableLanguages``.
+
+	We expose the base ISO codes of every supported language. NVDA uses this set
+	for ``languageIsSupported`` and to populate the manual Language setting.
+	"""
+	return set(SUPPORTED_LANGUAGES.keys())

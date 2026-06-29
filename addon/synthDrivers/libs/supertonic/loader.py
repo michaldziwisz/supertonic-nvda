@@ -17,11 +17,10 @@ import onnxruntime as ort  # type: ignore[import-untyped]
 
 from .config import (
     CFG_REL_PATH,
-    DEFAULT_CACHE_DIR,
     DEFAULT_INTER_OP_NUM_THREADS,
     DEFAULT_INTRA_OP_NUM_THREADS,
+    DEFAULT_MODEL,
     DEFAULT_MODEL_REPO,
-    DEFAULT_MODEL_REVISION,
     DEFAULT_ONNX_PROVIDERS,
     DP_ONNX_REL_PATH,
     TEXT_ENC_ONNX_REL_PATH,
@@ -29,6 +28,9 @@ from .config import (
     VECTOR_EST_ONNX_REL_PATH,
     VOCODER_ONNX_REL_PATH,
     VOICE_STYLES_DIR,
+    get_model_cache_dir,
+    get_model_repo,
+    get_model_revision,
 )
 from .core import Style, Supertonic, UnicodeProcessor
 from .utils import validate_voice_style_format
@@ -36,17 +38,24 @@ from .utils import validate_voice_style_format
 logger = logging.getLogger(__name__)
 
 
-def get_cache_dir() -> Path:
-    """Get or create the default cache directory for Supertonic models.
+def get_cache_dir(model_name: Optional[str] = None) -> Path:
+    """Get or create the cache directory for Supertonic models.
+
+    Args:
+        model_name: Model name (one of ``AVAILABLE_MODELS``).
+            If None, uses default cache directory.
 
     Returns:
         Path object pointing to the cache directory
 
     Note:
-        Default location is ~/.cache/supertonic, but can be overridden
-        with SUPERTONIC_CACHE_DIR environment variable
+        Default location depends on the loaded model
+        (e.g., ``~/.cache/supertonic3`` for supertonic-3), but can be
+        overridden with the ``SUPERTONIC_CACHE_DIR`` environment variable.
+        The override is resolved on every call (not snapshotted at import),
+        so late-set env vars are honored.
     """
-    cache_dir = Path(DEFAULT_CACHE_DIR)
+    cache_dir = get_model_cache_dir(model_name or DEFAULT_MODEL)
     cache_dir.mkdir(parents=True, exist_ok=True)
     logger.debug(f"Using cache directory: {cache_dir}")
     return cache_dir
@@ -86,13 +95,23 @@ def has_all_onnx_modules(model_dir: Union[Path, str]) -> bool:
     return all_exist
 
 
-def download_model(model_dir: Union[Path, str]) -> None:
+def download_model(model_dir: Union[Path, str], model_name: Optional[str] = None) -> None:
     """Download Supertonic model from HuggingFace Hub.
 
     Args:
         model_dir: Directory where the model should be downloaded (str or Path)
+        model_name: Model name (one of ``AVAILABLE_MODELS``).
+            If None, uses default model repository.
     """
     model_dir = Path(model_dir) if isinstance(model_dir, str) else model_dir
+
+    # Determine which repo and revision to download
+    effective_model = model_name or DEFAULT_MODEL
+    if model_name is not None:
+        repo_id = get_model_repo(model_name)
+    else:
+        repo_id = DEFAULT_MODEL_REPO
+    revision = get_model_revision(effective_model)
 
     # Use temporary directory for atomic download
     temp_dir = model_dir.parent / f".{model_dir.name}.tmp"
@@ -101,11 +120,9 @@ def download_model(model_dir: Union[Path, str]) -> None:
         from huggingface_hub import snapshot_download
 
         logger.info(
-            f"Downloading model from {DEFAULT_MODEL_REPO} to temporary location: {temp_dir}"
+            f"Downloading model from {repo_id} @ {revision[:12]} to temporary location: {temp_dir}"
         )
-        snapshot_download(
-            repo_id=DEFAULT_MODEL_REPO, local_dir=str(temp_dir), revision=DEFAULT_MODEL_REVISION
-        )
+        snapshot_download(repo_id=repo_id, local_dir=str(temp_dir), revision=revision)
 
         # Move from temporary to final location on success
         if model_dir.exists():
@@ -133,7 +150,7 @@ def download_model(model_dir: Union[Path, str]) -> None:
                 logger.warning(f"Failed to clean up temporary files: {cleanup_error}")
 
         raise RuntimeError(
-            f"Failed to download model from {DEFAULT_MODEL_REPO}. "
+            f"Failed to download model from {repo_id}. "
             f"Please check your internet connection and try again. "
             f"Error: {e}"
         ) from e
@@ -284,6 +301,7 @@ def load_model(
     auto_download: bool,
     intra_op_num_threads: Optional[int] = None,
     inter_op_num_threads: Optional[int] = None,
+    model_name: Optional[str] = None,
 ) -> Supertonic:
     """Load the complete Supertonic TTS model.
 
@@ -298,6 +316,8 @@ def load_model(
             None (default) lets ONNX Runtime auto-detect optimal value
         inter_op_num_threads: Number of threads for inter-op parallelism.
             None (default) lets ONNX Runtime auto-detect optimal value
+        model_name: Model name (one of ``AVAILABLE_MODELS``).
+            Used for downloading the correct model if auto_download is True.
 
     Returns:
         Initialized Supertonic TTS engine
@@ -313,7 +333,7 @@ def load_model(
                 f"Set auto_download=True to automatically download from HuggingFace Hub, "
                 f"or manually download the model to this directory."
             )
-        download_model(model_dir)
+        download_model(model_dir, model_name)
 
     cfgs = load_configs(model_dir)
     dp_ort, text_enc_ort, vector_est_ort, vocoder_ort = load_onnx_modules(

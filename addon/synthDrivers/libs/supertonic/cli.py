@@ -12,6 +12,7 @@ import sys
 import time
 
 from . import __version__
+from .config import AVAILABLE_LANGUAGES, AVAILABLE_MODELS, DEFAULT_MODEL
 from .pipeline import TTS
 
 logger = logging.getLogger(__name__)
@@ -39,9 +40,9 @@ def cmd_say(args):
 
     try:
         # Initialize TTS
-        print("Loading model...")
+        print(f"Loading model ({args.model})...")
         load_start = time.time()
-        tts = TTS()
+        tts = TTS(model=args.model)
         load_time = time.time() - load_start
         print(f"   -> Model loaded in {load_time:.2f}s")
 
@@ -77,7 +78,7 @@ def cmd_say(args):
         print(f"   -> Voice style loaded in {style_time:.3f}s")
 
         # Generate speech
-        print("Generating speech...")
+        print(f"Generating speech (lang={args.lang or 'auto'})...")
         start_time = time.time()
         wav, duration = tts.synthesize(
             args.text,
@@ -86,6 +87,7 @@ def cmd_say(args):
             speed=args.speed,
             max_chunk_length=args.max_chunk_length,
             silence_duration=args.silence_duration,
+            lang=args.lang,
             verbose=args.verbose,
         )
         elapsed_time = time.time() - start_time
@@ -117,9 +119,9 @@ def cmd_tts(args):
 
     try:
         # Initialize TTS
-        print("Loading model...")
+        print(f"Loading model ({args.model})...")
         load_start = time.time()
-        tts = TTS()
+        tts = TTS(model=args.model)
         load_time = time.time() - load_start
         print(f"   -> Model loaded in {load_time:.2f}s")
 
@@ -155,7 +157,7 @@ def cmd_tts(args):
         print(f"   -> Voice style loaded in {style_time:.3f}s")
 
         # Generate speech
-        print("Generating speech...")
+        print(f"Generating speech (lang={args.lang or 'auto'})...")
         start_time = time.time()
         wav, duration = tts.synthesize(
             args.text,
@@ -164,6 +166,7 @@ def cmd_tts(args):
             speed=args.speed,
             max_chunk_length=args.max_chunk_length,
             silence_duration=args.silence_duration,
+            lang=args.lang,
             verbose=args.verbose,
         )
         elapsed_time = time.time() - start_time
@@ -229,6 +232,52 @@ def cmd_version(args):
     print(f"supertonic {__version__}")
 
 
+def cmd_serve(args):
+    """Run a local HTTP server exposing /v1/tts and friends."""
+    if args.verbose:
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    else:
+        logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
+
+    try:
+        import uvicorn
+
+        from .server import create_app
+    except ImportError:
+        print("❌ Error: fastapi and uvicorn are required for the 'serve' command.")
+        print("   Install them with: pip install supertonic[serve]")
+        sys.exit(1)
+
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        # Bind to anything other than loopback is opt-in. Print a one-line
+        # warning so an accidental ``--host 0.0.0.0`` is visible.
+        print(
+            f"⚠️  Warning: binding to {args.host} exposes the server beyond loopback. "
+            "Add auth at a reverse proxy if this is intentional.",
+            file=sys.stderr,
+        )
+
+    cors_origins = None
+    if args.cors:
+        cors_origins = [o.strip() for o in args.cors.split(",") if o.strip()]
+
+    app = create_app(model=args.model, cors_origins=cors_origins)
+
+    print(f"supertonic serve listening on http://{args.host}:{args.port}")
+    print(f"  docs:  http://{args.host}:{args.port}/docs")
+    print(f"  model: {args.model}")
+
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level=args.log_level,
+        # uvicorn's reload mode requires an import string, not an app instance.
+        # We don't support it here — power users can run uvicorn directly
+        # against ``supertonic.server:create_app`` if they want reload.
+    )
+
+
 def create_parser() -> argparse.ArgumentParser:
     """Create and return the CLI argument parser.
 
@@ -253,6 +302,14 @@ Examples:
   # Use different voice and quality
   supertonic say 'This is a female voice style.' --voice F1 --steps 10
   supertonic tts 'This is a female voice style.' -o hello.wav --voice F1 --steps 10
+
+  # Multilingual support (supertonic-3 covers 31 languages — see --lang choices)
+  supertonic say '안녕하세요! 반갑습니다.' --lang ko
+  supertonic tts 'Bonjour le monde!' -o french.wav --lang fr
+  supertonic tts 'Hola, bienvenido!' -o spanish.wav --lang es
+
+  # Unknown / unsupported language fallback (supertonic-3)
+  supertonic say 'Some uncommon text' --lang na
 
   # Use custom voice style from JSON file
   supertonic say 'This is a custom voice test.' --custom-style-path ./my_voice.json
@@ -281,6 +338,16 @@ Examples:
         "say", help="Generate speech and play it directly without saving a file"
     )
     parser_say.add_argument("text", help="Text to synthesize and play")
+    parser_say.add_argument(
+        "--model",
+        type=str,
+        default=DEFAULT_MODEL,
+        choices=AVAILABLE_MODELS,
+        help=(
+            "Model to use: supertonic (English only), supertonic-2 (5 languages), "
+            f"or supertonic-3 (31 languages + 'na' fallback). Default: {DEFAULT_MODEL}"
+        ),
+    )
     parser_say.add_argument("--voice", default="M1", help="Voice style (default: M1)")
     parser_say.add_argument(
         "--custom-style-path",
@@ -289,7 +356,22 @@ Examples:
         help="Path to custom voice style JSON file (overrides --voice if provided)",
     )
     parser_say.add_argument(
-        "--steps", type=int, default=5, help="Quality steps (default: 5, higher=better)"
+        "--lang",
+        type=str,
+        default=None,
+        choices=AVAILABLE_LANGUAGES,
+        metavar="LANG",
+        help=(
+            "Language code (supertonic-3): "
+            "en, ko, ja, ar, bg, cs, da, de, el, es, et, fi, fr, hi, hr, hu, "
+            "id, it, lt, lv, nl, pl, pt, ro, ru, sk, sl, sv, tr, uk, vi, "
+            "or 'na' for unknown / unsupported languages. "
+            "Default: 'na' for multilingual models (supertonic-2/3), "
+            "'en' for supertonic v1."
+        ),
+    )
+    parser_say.add_argument(
+        "--steps", type=int, default=8, help="Quality steps (default: 8, higher=better)"
     )
     parser_say.add_argument(
         "--speed",
@@ -300,8 +382,8 @@ Examples:
     parser_say.add_argument(
         "--max-chunk-length",
         type=int,
-        default=300,
-        help="Maximum characters per chunk (default: 300)",
+        default=None,
+        help="Maximum characters per chunk (default: auto based on language)",
     )
     parser_say.add_argument(
         "--silence-duration",
@@ -316,6 +398,16 @@ Examples:
     parser_tts = subparsers.add_parser("tts", aliases=["t"], help="Generate speech from text")
     parser_tts.add_argument("text", help="Text to synthesize")
     parser_tts.add_argument("-o", "--output", required=True, help="Output WAV file")
+    parser_tts.add_argument(
+        "--model",
+        type=str,
+        default=DEFAULT_MODEL,
+        choices=AVAILABLE_MODELS,
+        help=(
+            "Model to use: supertonic (English only), supertonic-2 (5 languages), "
+            f"or supertonic-3 (31 languages + 'na' fallback). Default: {DEFAULT_MODEL}"
+        ),
+    )
     parser_tts.add_argument("--voice", default="M1", help="Voice style (default: M1)")
     parser_tts.add_argument(
         "--custom-style-path",
@@ -324,7 +416,22 @@ Examples:
         help="Path to custom voice style JSON file (overrides --voice if provided)",
     )
     parser_tts.add_argument(
-        "--steps", type=int, default=5, help="Quality steps (default: 5, higher=better)"
+        "--lang",
+        type=str,
+        default=None,
+        choices=AVAILABLE_LANGUAGES,
+        metavar="LANG",
+        help=(
+            "Language code (supertonic-3): "
+            "en, ko, ja, ar, bg, cs, da, de, el, es, et, fi, fr, hi, hr, hu, "
+            "id, it, lt, lv, nl, pl, pt, ro, ru, sk, sl, sv, tr, uk, vi, "
+            "or 'na' for unknown / unsupported languages. "
+            "Default: 'na' for multilingual models (supertonic-2/3), "
+            "'en' for supertonic v1."
+        ),
+    )
+    parser_tts.add_argument(
+        "--steps", type=int, default=8, help="Quality steps (default: 8, higher=better)"
     )
     parser_tts.add_argument(
         "--speed",
@@ -335,8 +442,8 @@ Examples:
     parser_tts.add_argument(
         "--max-chunk-length",
         type=int,
-        default=300,
-        help="Maximum characters per chunk (default: 300)",
+        default=None,
+        help="Maximum characters per chunk (default: auto based on language)",
     )
     parser_tts.add_argument(
         "--silence-duration",
@@ -355,7 +462,7 @@ Examples:
     parser_synth.add_argument("-o", "--output", required=True, help="Output WAV file")
     parser_synth.add_argument("--voice", default="M1", help="Voice style (default: M1)")
     parser_synth.add_argument(
-        "--steps", type=int, default=5, help="Quality steps (default: 5, higher=better)"
+        "--steps", type=int, default=8, help="Quality steps (default: 8, higher=better)"
     )
     add_common_args(parser_synth)
     parser_synth.set_defaults(func=cmd_tts)
@@ -381,6 +488,46 @@ Examples:
         "version", aliases=["v"], help="Show version information"
     )
     parser_version.set_defaults(func=cmd_version)
+
+    # Serve command — local HTTP wrapper. Installed via ``pip install supertonic[serve]``.
+    parser_serve = subparsers.add_parser(
+        "serve",
+        help="Run a local HTTP server exposing /v1/tts (and OpenAI-compatible /v1/audio/speech)",
+    )
+    parser_serve.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Interface to bind (default: 127.0.0.1; loopback only)",
+    )
+    parser_serve.add_argument(
+        "--port", type=int, default=7788, help="Port to listen on (default: 7788)"
+    )
+    parser_serve.add_argument(
+        "--model",
+        type=str,
+        default=DEFAULT_MODEL,
+        choices=AVAILABLE_MODELS,
+        help=f"Model to load on startup (default: {DEFAULT_MODEL})",
+    )
+    parser_serve.add_argument(
+        "--cors",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated CORS origins to allow (e.g. "
+            "'http://localhost:*,chrome-extension://*'). "
+            "Omit to disable CORS entirely."
+        ),
+    )
+    parser_serve.add_argument(
+        "--log-level",
+        type=str,
+        default="info",
+        choices=["critical", "error", "warning", "info", "debug", "trace"],
+        help="uvicorn log level (default: info)",
+    )
+    add_common_args(parser_serve)
+    parser_serve.set_defaults(func=cmd_serve)
 
     return parser
 

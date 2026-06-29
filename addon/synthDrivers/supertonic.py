@@ -11,12 +11,13 @@ if libs_path not in sys.path:
 
 import numpy as np
 import synthDriverHandler
+import languageHandler
 from logHandler import log
 import nvwave
 import supertonic
 from synthDriverHandler import synthIndexReached, synthDoneSpeaking
 from autoSettingsUtils.driverSetting import NumericDriverSetting
-from speech.commands import IndexCommand
+from speech.commands import IndexCommand, LangChangeCommand
 from supertonic.utils import chunk_text
 
 try:
@@ -52,10 +53,17 @@ def _build_remap(source_text, target_text):
 
 class SynthDriver(synthDriverHandler.SynthDriver):
 	"""
-	NVDA Synth Driver for Supertonic TTS.
+	NVDA Synth Driver for Supertonic TTS (multilingual, supertonic-3).
 	"""
 	name = "supertonic"
 	description = _("Supertonic")
+
+	# We support automatic language switching: when NVDA's "Automatic language
+	# switching" option is on, it injects LangChangeCommand objects into the
+	# speech sequence and we honour them per text segment. When off, no such
+	# commands arrive and we fall back to the manually selected language.
+	supportedCommands = {IndexCommand, LangChangeCommand}
+	supportedNotifications = {synthIndexReached, synthDoneSpeaking}
 
 	@classmethod
 	def check(cls):
@@ -88,6 +96,12 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		# NVDA rate 27 maps to approx 1.05 with our mapping: 0.7 + (27/100)*1.3 = 1.051
 		self._rate = 27 
 		self._quality = 5
+		# Manually selected language (used when automatic language switching is
+		# off). Defaults to NVDA's interface language if the model supports it,
+		# otherwise to English.
+		self._language = voices.normalize_lang(languageHandler.getLanguage()) or voices.DEFAULT_LANGUAGE
+		if self._language == voices.UNKNOWN_LANGUAGE:
+			self._language = voices.DEFAULT_LANGUAGE
 		
 		self._job_queue = queue.Queue()
 		self._generation = 0
@@ -103,7 +117,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 			except queue.Empty:
 				continue
 			
-			generation, text, index_map, voice_name, rate, quality = job
+			generation, segments, voice_name, rate, quality = job
 			
 			with self._generation_lock:
 				if generation != self._generation:
@@ -111,202 +125,240 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 					continue
 			
 			try:
-				self._process_job(generation, text, index_map, voice_name, rate, quality)
+				self._process_job(generation, segments, voice_name, rate, quality)
 			except Exception:
 				log.error("Error in Supertonic worker", exc_info=True)
 				synthDoneSpeaking.notify(synth=self)
 			finally:
 				self._job_queue.task_done()
 
-	def _process_job(self, job_generation, text, index_map, voice_name, rate, quality):
-		try:
-			# Sanitize text and remap indices
-			processor = self._tts.model.text_processor
-			filtered_chars = []
-			remap_filtered = [0] * (len(text) + 1)
-			
-			for i, char in enumerate(text):
-				remap_filtered[i] = len(filtered_chars)
-				is_valid, _ = processor.validate_text(char)
-				if is_valid:
-					filtered_chars.append(char)
-				# If invalid, it is skipped, and remap_filtered[i] remains pointing to current len(filtered_chars)
-				# which is the position effectively "after" the previous valid char.
-			
-			remap_filtered[len(text)] = len(filtered_chars)
-			filtered_text = "".join(filtered_chars)
-
-			if not filtered_text.strip():
-				synthDoneSpeaking.notify(synth=self)
-				return
-
-			max_chunk_length = 10000
-			silence_duration = 0.1
-			chunks = chunk_text(filtered_text, max_chunk_length)
-			processed_chunks = [processor._preprocess_text(chunk) for chunk in chunks]
-			processed_text = "".join(processed_chunks)
-			remap_processed = _build_remap(filtered_text, processed_text)
-			
-			# Rebuild index map with new offsets
-			new_index_map = []
-			for offset, idx in index_map:
-				# Clamp offset to bounds just in case
-				if offset > len(text):
-					offset = len(text)
-				filtered_offset = remap_filtered[offset]
-				if filtered_offset > len(filtered_text):
-					filtered_offset = len(filtered_text)
-				new_offset = remap_processed[filtered_offset]
-				if new_offset > len(processed_text):
-					new_offset = len(processed_text)
-				new_index_map.append((new_offset, idx))
-			
-			text = filtered_text
-			index_map = new_index_map
-
-			# Load the requested voice from the user voices directory. If it has
-			# gone missing (e.g. deleted in the manager), fall back to any other
-			# installed voice; if none remain, abort cleanly.
+	def _resolve_voice(self, voice_name):
+		"""Return (voice_name, voice_file) for an installed voice, or (None, None)."""
+		voice_file = voices.voice_path(voice_name)
+		if not voice_file.exists():
+			installed = voices.list_installed_voices()
+			if not installed:
+				return None, None
+			voice_name = installed[0]
+			self._voice = voice_name
 			voice_file = voices.voice_path(voice_name)
-			if not voice_file.exists():
-				installed = voices.list_installed_voices()
-				if not installed:
-					log.error("Supertonic: no voices installed; cannot synthesize")
-					synthDoneSpeaking.notify(synth=self)
-					return
-				voice_name = installed[0]
-				self._voice = voice_name
-				voice_file = voices.voice_path(voice_name)
-			voice_style = self._tts.get_voice_style_from_path(voice_file)
-			speed = 0.7 + (rate / 100.0) * (2.0 - 0.7)
-			
-			# Check cancellation before synthesis
-			with self._generation_lock:
-				if self._generation != job_generation:
-					return
+		return voice_name, voice_file
 
-			wav, _, dur_lists = self._tts.synthesize(
-				text,
-				voice_style=voice_style,
-				speed=speed,
-				total_steps=quality,
-				max_chunk_length=max_chunk_length,
-				silence_duration=silence_duration,
-				return_alignment=True
-			)
-			
-			cum_durations_list = []
-			elapsed = 0.0
-			for i, dur in enumerate(dur_lists):
-				flat = np.ravel(dur)
-				if flat.size == 0:
-					continue
-				chunk_cumsum = np.cumsum(flat) + elapsed
-				cum_durations_list.append(chunk_cumsum)
-				if i < len(dur_lists) - 1:
-					elapsed = chunk_cumsum[-1] + silence_duration
-				else:
-					elapsed = chunk_cumsum[-1]
+	def _process_job(self, job_generation, segments, voice_name, rate, quality):
+		"""Synthesize a list of (text, lang, index_map) segments in order.
 
-			all_durations = np.concatenate(cum_durations_list) if cum_durations_list else np.array([], dtype=np.float32)
-			bytes_per_sec = self._tts.sample_rate * 2
-			
-			audio_data = np.clip(wav.squeeze() * 32767, -32768, 32767).astype(np.int16).tobytes()
-			
-			# Check cancellation before feeding
-			with self._generation_lock:
-				if self._generation != job_generation:
-					return
-			
-			# Calculate byte offsets and group indices
-			cum_durations = np.cumsum(all_durations)
-			indices_by_offset = {}
-			audio_len = len(audio_data)
-			
-			for char_offset, index in index_map:
-				if char_offset >= len(cum_durations):
-					# Map to end of audio
-					target_time = cum_durations[-1] if len(cum_durations) > 0 else 0.0
-				elif char_offset == 0:
-					target_time = 0.0
-				else:
-					target_time = cum_durations[char_offset - 1]
-				
-				target_byte = int(target_time * bytes_per_sec)
-				target_byte = target_byte - (target_byte % 2)
-				
-				# Clamp to audio length to avoid feeding empty chunks past end
-				if target_byte > audio_len:
-					target_byte = audio_len
-				
-				if target_byte not in indices_by_offset:
-					indices_by_offset[target_byte] = []
-				indices_by_offset[target_byte].append(index)
-			
-			sorted_offsets = sorted(indices_by_offset.keys())
-			last_fed_byte = 0
-			
-			for offset in sorted_offsets:
-				# Check cancellation
-				with self._generation_lock:
-					if self._generation != job_generation:
-						return
-				
-				indices = indices_by_offset[offset]
-				
-				if offset == 0:
-					# Fire immediately
-					for idx in indices:
-						synthIndexReached.notify(synth=self, index=idx)
-					continue
-				
-				# Feed audio up to this offset
-				chunk_len = offset - last_fed_byte
-				if chunk_len > 0:
-					chunk = audio_data[last_fed_byte:offset]
-					
-					# Define callback
-					def on_done(idxs=indices):
-						for i in idxs:
-							synthIndexReached.notify(synth=self, index=i)
-					
-					self._player.feed(chunk, onDone=on_done)
-					last_fed_byte = offset
-				else:
-					for idx in indices:
-						synthIndexReached.notify(synth=self, index=idx)
-			
-			# Feed remaining audio
-			if last_fed_byte < len(audio_data):
-				chunk = audio_data[last_fed_byte:]
-				self._player.feed(chunk)
-			
-			# Wait for playback to finish
-			self._player.idle()
+		Each segment carries its own language so that, with automatic language
+		switching enabled, mixed-language text is spoken correctly. Audio from
+		all segments is fed to a single player so playback is continuous.
+		"""
+		voice_name, voice_file = self._resolve_voice(voice_name)
+		if voice_file is None:
+			log.error("Supertonic: no voices installed; cannot synthesize")
 			synthDoneSpeaking.notify(synth=self)
+			return
+		voice_style = self._tts.get_voice_style_from_path(voice_file)
+		speed = 0.7 + (rate / 100.0) * (2.0 - 0.7)
 
-		except Exception as e:
-			raise e
+		processor = self._tts.model.text_processor
+		max_chunk_length = 10000
+		silence_duration = 0.1
+
+		spoke_anything = False
+		for text, lang, index_map in segments:
+			with self._generation_lock:
+				if self._generation != job_generation:
+					return
+			if not text.strip():
+				continue
+			ok = self._synthesize_segment(
+				job_generation, processor, voice_style, speed, quality,
+				max_chunk_length, silence_duration, text, lang, index_map,
+			)
+			if ok:
+				spoke_anything = True
+
+		# Wait for playback to finish (only if we actually fed audio).
+		if spoke_anything:
+			with self._generation_lock:
+				if self._generation != job_generation:
+					return
+			self._player.idle()
+		synthDoneSpeaking.notify(synth=self)
+
+	def _synthesize_segment(
+		self, job_generation, processor, voice_style, speed, quality,
+		max_chunk_length, silence_duration, text, lang, index_map,
+	):
+		"""Synthesize and feed a single same-language text segment.
+
+		Returns True if audio was fed to the player. Index notifications are
+		fired in sync with playback, mirroring the original single-segment path.
+		"""
+		# Sanitize text and remap indices to the filtered text.
+		filtered_chars = []
+		remap_filtered = [0] * (len(text) + 1)
+		for i, char in enumerate(text):
+			remap_filtered[i] = len(filtered_chars)
+			is_valid, _ = processor.validate_text(char)
+			if is_valid:
+				filtered_chars.append(char)
+		remap_filtered[len(text)] = len(filtered_chars)
+		filtered_text = "".join(filtered_chars)
+
+		if not filtered_text.strip():
+			return False
+
+		chunks = chunk_text(filtered_text, max_chunk_length)
+		processed_chunks = [processor._preprocess_text(chunk, lang) for chunk in chunks]
+		processed_text = "".join(processed_chunks)
+		remap_processed = _build_remap(filtered_text, processed_text)
+
+		# Rebuild index map with new offsets.
+		new_index_map = []
+		for offset, idx in index_map:
+			if offset > len(text):
+				offset = len(text)
+			filtered_offset = remap_filtered[offset]
+			if filtered_offset > len(filtered_text):
+				filtered_offset = len(filtered_text)
+			new_offset = remap_processed[filtered_offset]
+			if new_offset > len(processed_text):
+				new_offset = len(processed_text)
+			new_index_map.append((new_offset, idx))
+		index_map = new_index_map
+
+		with self._generation_lock:
+			if self._generation != job_generation:
+				return False
+
+		wav, _, dur_lists = self._tts.synthesize(
+			filtered_text,
+			voice_style=voice_style,
+			speed=speed,
+			total_steps=quality,
+			max_chunk_length=max_chunk_length,
+			silence_duration=silence_duration,
+			lang=lang,
+			return_alignment=True,
+		)
+
+		cum_durations_list = []
+		elapsed = 0.0
+		for i, dur in enumerate(dur_lists):
+			flat = np.ravel(dur)
+			if flat.size == 0:
+				continue
+			chunk_cumsum = np.cumsum(flat) + elapsed
+			cum_durations_list.append(chunk_cumsum)
+			if i < len(dur_lists) - 1:
+				elapsed = chunk_cumsum[-1] + silence_duration
+			else:
+				elapsed = chunk_cumsum[-1]
+
+		all_durations = np.concatenate(cum_durations_list) if cum_durations_list else np.array([], dtype=np.float32)
+		bytes_per_sec = self._tts.sample_rate * 2
+
+		audio_data = np.clip(wav.squeeze() * 32767, -32768, 32767).astype(np.int16).tobytes()
+
+		with self._generation_lock:
+			if self._generation != job_generation:
+				return False
+
+		# Map index marks to playback time. supertonic-3's duration predictor
+		# only exposes a single total duration per chunk (no per-token
+		# durations), so we cannot place marks per character exactly. We map
+		# each index proportionally to its character position within the
+		# processed text, which gives smooth, continuous progress tracking
+		# (good enough for caret/say-all) rather than snapping to start/end.
+		total_time = float(all_durations[-1]) if len(all_durations) > 0 else 0.0
+		text_len = max(len(processed_text), 1)
+		indices_by_offset = {}
+		audio_len = len(audio_data)
+
+		for char_offset, index in index_map:
+			frac = 0.0 if char_offset <= 0 else min(char_offset / text_len, 1.0)
+			target_time = total_time * frac
+
+			target_byte = int(target_time * bytes_per_sec)
+			target_byte = target_byte - (target_byte % 2)
+			if target_byte > audio_len:
+				target_byte = audio_len
+
+			if target_byte not in indices_by_offset:
+				indices_by_offset[target_byte] = []
+			indices_by_offset[target_byte].append(index)
+
+		sorted_offsets = sorted(indices_by_offset.keys())
+		last_fed_byte = 0
+
+		for offset in sorted_offsets:
+			with self._generation_lock:
+				if self._generation != job_generation:
+					return True
+
+			indices = indices_by_offset[offset]
+
+			if offset == 0:
+				for idx in indices:
+					synthIndexReached.notify(synth=self, index=idx)
+				continue
+
+			chunk_len = offset - last_fed_byte
+			if chunk_len > 0:
+				chunk = audio_data[last_fed_byte:offset]
+
+				def on_done(idxs=indices):
+					for i in idxs:
+						synthIndexReached.notify(synth=self, index=i)
+
+				self._player.feed(chunk, onDone=on_done)
+				last_fed_byte = offset
+			else:
+				for idx in indices:
+					synthIndexReached.notify(synth=self, index=idx)
+
+		# Feed remaining audio.
+		if last_fed_byte < len(audio_data):
+			chunk = audio_data[last_fed_byte:]
+			self._player.feed(chunk)
+		return True
 
 	def speak(self, speechSequence):
+		# Split the sequence into same-language segments. NVDA inserts
+		# LangChangeCommand items only when automatic language switching is on;
+		# otherwise the whole sequence uses the manually selected language.
+		segments = []
+		current_lang = self._language
 		text = ""
-		index_map = [] 
+		index_map = []
+
+		def flush():
+			nonlocal text, index_map
+			if text:
+				segments.append((text, voices.normalize_lang(current_lang) or self._language, index_map))
+			text = ""
+			index_map = []
 
 		for item in speechSequence:
 			if isinstance(item, str):
 				text += item
 			elif isinstance(item, IndexCommand):
 				index_map.append((len(text), item.index))
+			elif isinstance(item, LangChangeCommand):
+				# Close the current segment and switch language. A None lang
+				# means "back to the NVDA default" -> use the manual setting.
+				flush()
+				current_lang = item.lang if item.lang else self._language
+		flush()
 
-		if not text.strip():
+		if not any(t.strip() for t, _l, _im in segments):
 			synthDoneSpeaking.notify(synth=self)
 			return
 
 		with self._generation_lock:
 			generation = self._generation
 
-		# Push to queue
-		self._job_queue.put((generation, text, index_map, self._voice, self._rate, self._quality))
+		self._job_queue.put((generation, segments, self._voice, self._rate, self._quality))
 
 	def cancel(self):
 		with self._generation_lock:
@@ -333,6 +385,8 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 
 	def _get_availableVoices(self):
 		# Voices are the JSON style files installed in the user directory.
+		# Voices are language-independent (the model is multilingual), so
+		# VoiceInfo.language is left as None.
 		result = {}
 		for name in voices.list_installed_voices():
 			result[name] = synthDriverHandler.VoiceInfo(name, voices.voice_label(name))
@@ -355,6 +409,21 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		elif self._voice not in installed and installed:
 			self._voice = installed[0]
 
+	def _get_language(self):
+		return self._language
+
+	def _set_language(self, language):
+		# Map the requested locale onto a supported model language. Unknown
+		# locales fall back to English so the manual setting is always valid.
+		code = voices.normalize_lang(language)
+		if code and code != voices.UNKNOWN_LANGUAGE:
+			self._language = code
+		else:
+			self._language = voices.DEFAULT_LANGUAGE
+
+	def _get_availableLanguages(self):
+		return voices.available_locales()
+
 	def _get_rate(self):
 		return self._rate
 
@@ -370,7 +439,6 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 	supportedSettings = (
 		NumericDriverSetting("quality", _("Speech Quality Control"), 1, 100, 5),
 		synthDriverHandler.SynthDriver.VoiceSetting(),
+		synthDriverHandler.SynthDriver.LanguageSetting(),
 		synthDriverHandler.SynthDriver.RateSetting(),
 	)
-
-	supportedNotifications = {synthIndexReached, synthDoneSpeaking}

@@ -15,7 +15,7 @@ from unicodedata import normalize
 import numpy as np
 import onnxruntime as ort  # type: ignore[import-untyped]
 
-from .config import MAX_SPEED, MIN_SPEED
+from .config import AVAILABLE_LANGUAGES, MAX_SPEED, MIN_SPEED
 
 logger = logging.getLogger(__name__)
 
@@ -44,10 +44,10 @@ _SYMBOL_REPLACEMENTS = {
     "\u2014": "-",  # EM DASH (—)
     "\u00af": " ",  # MACRON (¯)
     "_": " ",
-    "\u201c": '"',  # LEFT DOUBLE QUOTATION MARK (“)
-    "\u201d": '"',  # RIGHT DOUBLE QUOTATION MARK (”)
-    "\u2018": "'",  # LEFT SINGLE QUOTATION MARK (‘)
-    "\u2019": "'",  # RIGHT SINGLE QUOTATION MARK (’)
+    "\u201c": '"',  # LEFT DOUBLE QUOTATION MARK (")
+    "\u201d": '"',  # RIGHT DOUBLE QUOTATION MARK (")
+    "\u2018": "'",  # LEFT SINGLE QUOTATION MARK (')
+    "\u2019": "'",  # RIGHT SINGLE QUOTATION MARK (')
     "\u00b4": "'",  # ACUTE ACCENT (´)
     "`": "'",
     "[": " ",
@@ -58,10 +58,6 @@ _SYMBOL_REPLACEMENTS = {
     "→": " ",
     "←": " ",
 }
-
-_DIACRITICS_PATTERN = re.compile(
-    r"[\u0302\u0303\u0304\u0305\u0306\u0307\u0308\u030A\u030B\u030C\u0327\u0328\u0329\u032A\u032B\u032C\u032D\u032E\u032F]"
-)
 
 _SPECIAL_SYMBOLS_PATTERN = re.compile(r"[♥☆♡©\\]")
 
@@ -181,11 +177,8 @@ class UnicodeProcessor:
             text = text.replace(old, new)
         return text
 
-    def _remove_diacritics_and_special_chars(self, text: str) -> str:
-        """Remove combining diacritics and special symbols."""
-        # Remove combining diacritics using pre-compiled pattern
-        text = _DIACRITICS_PATTERN.sub("", text)
-        # Remove special symbols using pre-compiled pattern
+    def _remove_special_chars(self, text: str) -> str:
+        """Remove unsupported decorative symbols while preserving diacritics."""
         text = _SPECIAL_SYMBOLS_PATTERN.sub("", text)
         return text
 
@@ -225,22 +218,47 @@ class UnicodeProcessor:
             text += "."
         return text
 
-    def _preprocess_text(self, text: str) -> str:
+    def _add_language_token(self, text: str, lang: str) -> str:
+        """Add language tokens to text for multilingual model.
+
+        Args:
+            text: Preprocessed text
+            lang: Language code from ``AVAILABLE_LANGUAGES`` (or ``"na"``
+                for unknown / unsupported languages)
+
+        Returns:
+            Text wrapped with language tokens: ``<lang>text</lang>``
+            (e.g., ``<en>...</en>`` or ``<na>...</na>``)
+        """
+        if lang not in AVAILABLE_LANGUAGES:
+            raise ValueError(
+                f"Invalid language: '{lang}'. "
+                f"Supported languages: {', '.join(AVAILABLE_LANGUAGES)}"
+            )
+        return f"<{lang}>{text}</{lang}>"
+
+    def _preprocess_text(self, text: str, lang: Optional[str] = None) -> str:
         """Preprocess text by normalizing, cleaning, and standardizing format.
 
         This method applies a series of text transformations in sequence:
         1. Unicode normalization (NFKD)
         2. Emoji removal
         3. Symbol normalization
-        4. Diacritics and special character removal
+        4. Decorative symbol removal
         5. Abbreviation expansion
         6. Punctuation spacing fixes
         7. Duplicate quote removal
         8. Whitespace cleaning
         9. Add period if needed
+        10. Add language tokens (for multilingual models)
 
         Args:
             text: Raw input text
+            lang: Language code for multilingual support. Supertonic-3
+                supports 31 ISO codes plus the ``"na"`` fallback for
+                unknown languages; Supertonic-2 supports
+                ``en``, ``ko``, ``es``, ``pt``, ``fr``.
+                If None, no language tokens are added (v1 compatibility).
 
         Returns:
             Preprocessed and normalized text
@@ -253,12 +271,17 @@ class UnicodeProcessor:
 
         text = self._remove_emojis(text)
         text = self._normalize_symbols(text)
-        text = self._remove_diacritics_and_special_chars(text)
+        text = self._remove_special_chars(text)
         text = self._expand_abbreviations(text)
         text = self._fix_punctuation_spacing(text)
         text = self._remove_duplicate_quotes(text)
         text = self._clean_whitespace(text)
         text = self._add_period_if_needed(text)
+
+        # Add language tokens for multilingual models (supertonic-2 / supertonic-3)
+        if lang is not None:
+            text = self._add_language_token(text, lang)
+
         return text
 
     def _get_text_mask(self, text_ids_lengths: np.ndarray) -> np.ndarray:
@@ -302,18 +325,23 @@ class UnicodeProcessor:
         text_cat = "".join(text_list)
         return self.validate_text(text_cat)
 
-    def __call__(self, text_list: list[str]) -> tuple[np.ndarray, np.ndarray]:
+    def __call__(
+        self, text_list: list[str], lang: Optional[str] = None
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Process a list of texts into model inputs.
 
         Args:
             text_list: List of text strings to process
+            lang: Language code for multilingual support. Use any code from
+                ``AVAILABLE_LANGUAGES`` (or ``"na"`` for unknown languages).
+                If None, no language tokens are added (v1 compatibility).
 
         Returns:
             Tuple of (text_ids, text_mask):
                 - text_ids: Array of shape (batch_size, max_length) with unicode indices
                 - text_mask: Array of shape (batch_size, 1, max_length) with attention mask
         """
-        preprocessed_texts = [self._preprocess_text(t) for t in text_list]
+        preprocessed_texts = [self._preprocess_text(t, lang) for t in text_list]
         text_ids_lengths = np.array([len(text) for text in preprocessed_texts], dtype=np.int64)
         text_ids = np.zeros((len(preprocessed_texts), text_ids_lengths.max()), dtype=np.int64)
         for i, text in enumerate(preprocessed_texts):
@@ -433,7 +461,12 @@ class Supertonic:
         return noisy_latent, latent_mask
 
     def __call__(
-        self, text_list: list[str], style: Style, total_step: int = 5, speed: float = 1.05
+        self,
+        text_list: list[str],
+        style: Style,
+        total_step: int = 5,
+        speed: float = 1.05,
+        lang: Optional[str] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Synthesize speech from text using the specified style.
 
@@ -442,6 +475,10 @@ class Supertonic:
             style: Voice style object containing style vectors
             total_step: Number of diffusion steps (higher = better quality, slower)
             speed: Speech speed multiplier (0.7 = slower, 2.0 = faster)
+            lang: Language code for multilingual support.
+                Required for multilingual models (supertonic-2 / supertonic-3).
+                See ``AVAILABLE_LANGUAGES`` for the full list. Use ``"na"``
+                for unknown / unsupported languages (supertonic-3 only).
 
         Returns:
             Tuple of (waveform, duration):
@@ -463,7 +500,7 @@ class Supertonic:
             )
 
         bsz = len(text_list)
-        text_ids, text_mask = self.text_processor(text_list)
+        text_ids, text_mask = self.text_processor(text_list, lang)
         dur_onnx, *_ = self.dp_ort.run(
             None, {"text_ids": text_ids, "style_dp": style.dp, "text_mask": text_mask}
         )

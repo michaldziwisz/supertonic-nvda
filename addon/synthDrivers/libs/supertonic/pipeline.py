@@ -9,18 +9,25 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Optional, Union, List, Tuple
+from typing import Optional, Union
 
 import numpy as np
 
 from .config import (
+    AVAILABLE_LANGUAGES,
+    AVAILABLE_MODELS,
+    DEFAULT_LANGUAGE,
     DEFAULT_MAX_CHUNK_LENGTH,
+    DEFAULT_MAX_CHUNK_LENGTH_KO,
+    DEFAULT_MODEL,
     DEFAULT_SILENCE_DURATION,
     DEFAULT_SPEED,
     DEFAULT_TOTAL_STEPS,
     MAX_TEXT_LENGTH,
     MAX_TOTAL_STEPS,
     MIN_TOTAL_STEPS,
+    UNKNOWN_LANGUAGE,
+    is_multilingual_model,
 )
 from .core import Style
 from .loader import (
@@ -39,8 +46,11 @@ class TTS:
     """High-level interface for Supertonic text-to-speech synthesis.
 
     Args:
+        model: Model name to use. One of ``"supertonic"`` (English only),
+            ``"supertonic-2"`` (5 languages), or ``"supertonic-3"`` (31
+            languages + ``"na"`` fallback). Default: ``"supertonic-3"``.
         model_dir: Directory containing model files. If None, uses default cache
-            directory (~/.cache/supertonic)
+            directory based on model name.
         auto_download: If True, automatically downloads model files from
             HuggingFace Hub if they're missing
         intra_op_num_threads: Number of threads for intra-op parallelism.
@@ -52,22 +62,34 @@ class TTS:
 
     Attributes:
         model (supertonic.core.Supertonic): The underlying Supertonic engine
+        model_name (str): Name of the loaded model
         model_dir (pathlib.Path): Path to the model directory
         sample_rate (int): Audio sample rate in Hz
         voice_style_names (list[str]): List of available voice style names
+        is_multilingual (bool): Whether the model supports multiple languages
 
     Example:
         ```python
         from supertonic import TTS
+
+        # Use default model (supertonic-3 with 31-language support)
         tts = TTS()
         style = tts.get_voice_style("M1")
-        wav, dur = tts.synthesize("Welcome to Supertonic text to speech synthesis.", voice_style=style)
-        tts.save_audio(wav, "output.wav")
+        wav, dur = tts.synthesize("Hello!", voice_style=style, lang="en")
+
+        # Unknown language fallback (supertonic-3)
+        wav, dur = tts.synthesize("Some text", voice_style=style, lang="na")
+
+        # Use a specific model version
+        tts_v1 = TTS(model="supertonic")    # English only
+        tts_v2 = TTS(model="supertonic-2")  # 5 languages
+        tts_v3 = TTS(model="supertonic-3")  # 31 languages + na
         ```
     """
 
     def __init__(
         self,
+        model: str = DEFAULT_MODEL,
         model_dir: Optional[Union[Path, str]] = None,
         auto_download: bool = True,
         intra_op_num_threads: Optional[int] = None,
@@ -76,8 +98,9 @@ class TTS:
         """Initialize the TTS engine.
 
         Args:
+            model: Model name. One of ``AVAILABLE_MODELS``. Default: ``"supertonic-3"``.
             model_dir (Union[Path, str]): Directory containing model files. If None, uses default
-                cache directory
+                cache directory based on model name
             auto_download: If True, automatically downloads missing model files
             intra_op_num_threads: Number of threads for intra-op parallelism.
                 If None (default), ONNX Runtime automatically determines optimal value based on your system.
@@ -86,14 +109,23 @@ class TTS:
                 If None (default), ONNX Runtime automatically determines optimal value based on your system.
                 Can also be set via SUPERTONIC_INTER_OP_THREADS environment variable
         """
+        # Validate model name
+        if model not in AVAILABLE_MODELS:
+            raise ValueError(
+                f"Invalid model: '{model}'. " f"Available models: {', '.join(AVAILABLE_MODELS)}"
+            )
+
+        self.model_name = model
+        self.is_multilingual = is_multilingual_model(model)
+
         if model_dir is None:
-            model_dir = get_cache_dir()
+            model_dir = get_cache_dir(model)
 
         if not isinstance(model_dir, Path):
             model_dir = Path(model_dir)
 
         self.model = load_model(
-            model_dir, auto_download, intra_op_num_threads, inter_op_num_threads
+            model_dir, auto_download, intra_op_num_threads, inter_op_num_threads, model
         )
         self.model_dir = model_dir
         self.sample_rate = self.model.sample_rate
@@ -104,7 +136,8 @@ class TTS:
             `list_available_voice_style_names()`.
 
         Args:
-            voice_name: Name of the voice style (e.g., 'M1', 'F1', 'M2', 'F2')
+            voice_name: Name of the voice style. Supertonic-3 ships with
+                10 built-in voices: ``'M1'..'M5'`` and ``'F1'..'F5'``.
 
         Returns:
             Style object containing voice style vectors
@@ -128,11 +161,12 @@ class TTS:
         voice_style: Style,
         total_steps: int = DEFAULT_TOTAL_STEPS,
         speed: float = DEFAULT_SPEED,
-        max_chunk_length: int = DEFAULT_MAX_CHUNK_LENGTH,
+        max_chunk_length: Optional[int] = None,
         silence_duration: float = DEFAULT_SILENCE_DURATION,
+        lang: Optional[str] = None,
         verbose: bool = False,
         return_alignment: bool = False,
-    ) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, List[np.ndarray]]]:
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Synthesize speech from text.
 
         This method automatically chunks long text into smaller segments
@@ -141,26 +175,30 @@ class TTS:
         Args:
             text: Text to synthesize
             voice_style: Voice style object
-            total_steps: Number of synthesis steps (default: 5)
+            total_steps: Number of synthesis steps (default: 8)
             speed: Speech speed multiplier (default: 1.05)
-            max_chunk_length: Max characters per chunk (default: 300)
+            max_chunk_length: Max characters per chunk. If None, automatically
+                determined based on language (300 for most, 120 for Korean)
             silence_duration: Silence between chunks in seconds (default: 0.3)
+            lang: Language code for synthesis. If ``None`` (default), the
+                code is resolved from the loaded model: ``"na"`` for
+                multilingual models (supertonic-2/3) so unknown text "just
+                works", and ``"en"`` for the English-only supertonic v1.
+                See ``AVAILABLE_LANGUAGES`` for the full list of codes
+                supported by the loaded model.
             verbose: If True, print detailed progress information (default: False)
-            return_alignment: If True, returns a third element with alignment data (durations per token)
 
         Returns:
             Tuple of (waveform, duration):
                 - waveform: Audio array of shape (1, num_samples)
                 - duration: Total duration in seconds
-            If return_alignment is True:
-            Tuple of (waveform, duration, durations_list):
-                - durations_list: List of duration arrays (one per chunk, each array containing per-token durations)
 
         Example:
             ```python
             tts = TTS()
             style = tts.get_voice_style("M1")
-            wav, dur = tts.synthesize("The train delay was announced at 4:45 PM on Wed, Apr 3, 2024 due to track maintenance.", voice_style=style, total_steps=5)
+            wav, dur = tts.synthesize("Hello, world!", voice_style=style, lang="en")
+            wav_ko, dur_ko = tts.synthesize("안녕하세요!", voice_style=style, lang="ko")
             print(f"Generated {dur[0]:.2f}s of audio")
             ```
         """
@@ -168,8 +206,32 @@ class TTS:
         if not text or not text.strip():
             raise ValueError("Text cannot be empty")
 
+        # Resolve default lang based on the loaded model:
+        #   - multilingual (supertonic-2/3) → "na" so unknown text just works
+        #   - English-only (supertonic v1)  → "en"
+        if lang is None:
+            lang = UNKNOWN_LANGUAGE if self.is_multilingual else DEFAULT_LANGUAGE
+
+        # Validate language and handle non-multilingual models
+        if self.is_multilingual:
+            if lang not in AVAILABLE_LANGUAGES:
+                raise ValueError(
+                    f"Invalid language: '{lang}'. "
+                    f"Supported languages: {', '.join(AVAILABLE_LANGUAGES)}"
+                )
+            effective_lang: Optional[str] = lang
+        else:
+            # Non-multilingual model (supertonic v1) - ignore language parameter
+            if lang != "en" and verbose:
+                print(f"⚠️  Model '{self.model_name}' is English-only. Ignoring lang='{lang}'.")
+            effective_lang = None  # Don't add language tokens for v1
+
         if verbose:
             print(f"📝 Input text length: {len(text)} characters")
+            if self.is_multilingual:
+                print(f"🌐 Language: {lang}")
+            else:
+                print(f"🌐 Model: {self.model_name} (English only)")
 
         if len(text) > MAX_TEXT_LENGTH:
             raise ValueError(
@@ -197,6 +259,12 @@ class TTS:
         if not is_valid:
             raise ValueError(f"Found {len(unsupported)} unsupported character(s): {unsupported}")
 
+        # Determine max_chunk_length based on language if not specified
+        if max_chunk_length is None:
+            max_chunk_length = (
+                DEFAULT_MAX_CHUNK_LENGTH_KO if effective_lang == "ko" else DEFAULT_MAX_CHUNK_LENGTH
+            )
+
         # Chunk text for processing
         text_chunks = chunk_text(text, max_chunk_length)
 
@@ -214,34 +282,24 @@ class TTS:
         # Collect all waveforms and durations in lists to avoid repeated concatenation
         wav_list = []
         dur_list = []
-        token_dur_list = [] # List of per-token duration arrays
-
         for i, text_chunk in enumerate(text_chunks):
             if verbose:
                 print(f"   [{i+1}/{len(text_chunks)}] Processing chunk... ", end="", flush=True)
 
             logger.debug(f"Processing chunk {i+1}/{len(text_chunks)}")
-            # self.model(...) returns (wav, dur_onnx) where dur_onnx is per-token duration?
-            # Actually, core.py says: dur_onnx, *_ = self.dp_ort.run(...)
-            # And returns: wav, dur_onnx.
-            # So yes, dur_onnx is the detailed duration info.
-            # But core.py returns: wav, dur_onnx.
-            # Wait, core.py: return wav, dur_onnx
-            # And dur_onnx from dp_ort.run usually has shape (batch, sequence_length).
-            
-            wav, dur_onnx = self.model([text_chunk], voice_style, total_steps, speed)
+            wav, dur_onnx = self.model(
+                [text_chunk], voice_style, total_steps, speed, effective_lang
+            )
 
             if verbose:
-                # dur_onnx is per-token, so sum it for total duration
-                print(f"✓ ({np.sum(dur_onnx):.2f}s)")
+                print(f"✓ ({dur_onnx[0]:.2f}s)")
 
             # Validate waveform shape
             if wav.shape[0] != 1:
                 raise RuntimeError(f"Expected wav shape (1, samples), got {wav.shape}")
 
             wav_list.append(wav)
-            dur_list.append(np.sum(dur_onnx)) # Total duration for this chunk
-            token_dur_list.append(dur_onnx)
+            dur_list.append(dur_onnx)
 
         # Type guard: lists should never be empty after processing
         assert len(wav_list) > 0 and len(dur_list) > 0, "No audio generated"
@@ -260,7 +318,7 @@ class TTS:
         # Calculate total duration
         total_audio_dur = sum(dur_list)
         total_silence_dur = silence_duration * (len(wav_list) - 1)
-        dur_cat = np.array([total_audio_dur + total_silence_dur], dtype=np.float32)
+        dur_cat = total_audio_dur + total_silence_dur
 
         if verbose:
             total_samples = wav_cat.shape[1]
@@ -270,7 +328,9 @@ class TTS:
             print(f"Array shape: {wav_cat.shape}")
 
         if return_alignment:
-            return wav_cat, dur_cat, token_dur_list
+            # Per-chunk per-token duration arrays, mirroring the original
+            # addon's alignment API used for index/word synchronization.
+            return wav_cat, dur_cat, dur_list
         return wav_cat, dur_cat
 
     def save_audio(
@@ -312,8 +372,9 @@ class TTS:
         voice_style: Style,
         total_steps: int = DEFAULT_TOTAL_STEPS,
         speed: float = DEFAULT_SPEED,
-        max_chunk_length: int = DEFAULT_MAX_CHUNK_LENGTH,
+        max_chunk_length: Optional[int] = None,
         silence_duration: float = DEFAULT_SILENCE_DURATION,
+        lang: Optional[str] = None,
         verbose: bool = False,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Shorthand for synthesize(). Allows using tts(...) instead of tts.synthesize(...).
@@ -321,10 +382,16 @@ class TTS:
         Args:
             text: Text to synthesize
             voice_style: Voice style object
-            total_steps: Number of synthesis steps (default: 5)
+            total_steps: Number of synthesis steps (default: 8)
             speed: Speech speed multiplier (default: 1.05)
-            max_chunk_length: Max characters per chunk (default: 300)
+            max_chunk_length: Max characters per chunk. If None, automatically
+                determined based on language (300 for most, 120 for Korean)
             silence_duration: Silence between chunks in seconds (default: 0.3)
+            lang: Language code for synthesis. If ``None`` (default), the
+                code is resolved from the loaded model: ``"na"`` for
+                multilingual models (supertonic-2/3), ``"en"`` for the
+                English-only supertonic v1. See ``AVAILABLE_LANGUAGES``
+                for the full list.
             verbose: If True, print detailed progress information (default: False)
 
         Returns:
@@ -336,7 +403,8 @@ class TTS:
             ```python
             tts = TTS()
             style = tts.get_voice_style("M1")
-            wav, dur = tts("The train delay was announced at 4:45 PM on Wed, Apr 3, 2024 due to track maintenance.", voice_style=style, total_steps=5)
+            wav, dur = tts("Hello, world!", voice_style=style, lang="en")
+            wav_ko, dur_ko = tts("안녕하세요!", voice_style=style, lang="ko")
             print(f"Generated {dur[0]:.2f}s of audio")
             ```
         """
@@ -347,5 +415,6 @@ class TTS:
             speed=speed,
             max_chunk_length=max_chunk_length,
             silence_duration=silence_duration,
+            lang=lang,
             verbose=verbose,
         )

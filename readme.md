@@ -9,9 +9,28 @@ Supertonic is a high-performance, on-device TTS powered by ONNX Runtime. However
 
 - High-quality, lightning-fast speech synthesis.
 - On-device processing (no internet required for synthesis itself).
-- Multiple official voice styles (M1-M5, F1-F5), downloaded on demand.
+- **Multilingual: 31 languages** (supertonic-3), including Polish and Ukrainian.
+- Automatic language switching, or a manual language choice.
+- Multiple speaker voice styles (M1-M5, F1-F5), downloaded on demand.
 - A built-in voice manager to download, delete and switch voices.
 - Control over speech speed and quality.
+
+## Languages
+
+This add-on uses the multilingual supertonic-3 model, which supports 31
+languages: English, Korean, Japanese, Arabic, Bulgarian, Czech, Danish, German,
+Greek, Spanish, Estonian, Finnish, French, Hindi, Croatian, Hungarian,
+Indonesian, Italian, Lithuanian, Latvian, Dutch, Polish, Portuguese, Romanian,
+Russian, Slovak, Slovenian, Swedish, Turkish, Ukrainian and Vietnamese.
+
+The same speaker voices speak in whichever language the text is in.
+
+- **Automatic language switching:** when NVDA's "Automatic language switching"
+  option is enabled (Speech settings), each piece of text is spoken in its own
+  language automatically.
+- **Manual language:** when automatic switching is off, the **Language** setting
+  in Speech settings selects the language to use. Text in a language outside the
+  supported set falls back to a language-agnostic mode.
 
 ## Voices
 
@@ -54,7 +73,13 @@ synthesizer.
 The following settings are available in NVDA's Speech settings dialog when Supertonic is selected as the synthesizer:
 
 ### Voice
-Choose from several available voice styles (M1-M5, F1-F5).
+Choose from several available speaker voice styles (M1-M5, F1-F5). Each voice
+can speak any of the supported languages.
+
+### Language
+Select the language used when automatic language switching is turned off. When
+automatic switching is on, NVDA chooses the language per piece of text and this
+setting is not used.
 
 ### Rate (Speech Speed Control)
 Adjust the speed of the speech.
