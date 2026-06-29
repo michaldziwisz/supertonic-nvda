@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.2
+
+- Fixed garbled, sped-up "drunken" speech that occurred after the model was
+  switched to the multilingual supertonic-3 engine. Voice style files are tied
+  to a specific model; voices downloaded for the previous English-only model
+  produce half-length, distorted audio when fed to supertonic-3, but did not
+  raise any error (so nothing appeared in the log).
+- Voices are now stamped with the model revision they were downloaded for. On
+  start-up, any voices that do not match the bundled model are discarded
+  automatically so they can be re-downloaded for the correct model. A fresh
+  install is unaffected.
+
 ## 1.2.1
 
 - Fixed a crash when opening NVDA's Speech settings while Supertonic was the

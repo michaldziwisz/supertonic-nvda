@@ -127,12 +127,69 @@ def _is_valid_voice_file(path: Path) -> bool:
 
 
 def list_installed_voices() -> list[str]:
-	"""Sorted names of voices currently installed in the user directory."""
+	"""Sorted names of voices currently installed for the CURRENT model.
+
+	Voice style files are tied to a specific model revision (a voice downloaded
+	for the old English-only model produces garbled, half-length audio if fed to
+	the multilingual supertonic-3 model). We therefore stamp the voices
+	directory with the model revision at download time and, if that stamp does
+	not match the model the add-on now ships, treat the leftover voices as not
+	installed (and purge them) so they can be re-downloaded for the new model.
+	"""
+	_purge_stale_voices()
 	voices_dir = get_user_voices_dir()
 	names = []
 	for p in voices_dir.glob("*.json"):
 		names.append(p.stem)
 	return sorted(names)
+
+
+# Name of the marker file (inside the user voices dir) recording which model
+# revision the installed voices were downloaded for.
+_REVISION_STAMP = ".model_revision"
+
+
+def _stamp_path() -> Path:
+	return get_user_voices_dir() / _REVISION_STAMP
+
+
+def _read_voices_revision() -> Optional[str]:
+	try:
+		return _stamp_path().read_text(encoding="utf-8").strip()
+	except Exception:
+		return None
+
+
+def _write_voices_revision() -> None:
+	try:
+		_stamp_path().write_text(HF_REVISION, encoding="utf-8")
+	except Exception:
+		pass
+
+
+def _purge_stale_voices() -> bool:
+	"""Remove voice files that were downloaded for a different model revision.
+
+	Returns True if anything was purged. A missing stamp is treated as stale
+	whenever voice files exist, because such voices predate revision stamping
+	and may belong to the old (incompatible) model. Returns without touching an
+	empty directory so a fresh install simply has no stamp yet.
+	"""
+	voices_dir = get_user_voices_dir()
+	existing = list(voices_dir.glob("*.json"))
+	if not existing:
+		return False
+	if _read_voices_revision() == HF_REVISION:
+		return False
+	for p in existing:
+		try:
+			p.unlink()
+		except Exception:
+			pass
+	# Reset the stamp to the current revision: the directory is now empty, so
+	# any voice the user (re)downloads will correctly match the active model.
+	_write_voices_revision()
+	return True
 
 
 def is_voice_installed(name: str) -> bool:
@@ -204,6 +261,9 @@ def download_voice(name: str) -> Path:
 		tmp_final = dest.parent / f".{name}.json.tmp"
 		shutil.copyfile(downloaded_path, tmp_final)
 		os.replace(tmp_final, dest)
+		# Record which model revision these voices belong to, so a later model
+		# change invalidates them instead of silently producing garbled audio.
+		_write_voices_revision()
 		return dest
 	finally:
 		shutil.rmtree(tmp_root, ignore_errors=True)
