@@ -23,10 +23,10 @@ addon_info = AddonInfo(
 	# Translators: Long description to be shown for this add-on on add-on information from add-on store
 	addon_description=_("""A high-performance, on-device text-to-speech synthesizer driver for NVDA using the Supertonic engine."""),
 	# version
-	addon_version="1.2.0",
+	addon_version="1.2.1",
 	# Brief changelog for this version
 	# Translators: what's new content for the add-on version to be shown in the add-on store
-	addon_changelog=_("""Switched to the multilingual supertonic-3 model: 31 languages including Polish and Ukrainian. Added automatic language switching (honours NVDA's setting) and a manual Language setting. Voices are downloaded on demand and the synthesizer stays unavailable until at least one voice is installed."""),
+	addon_changelog=_("""Fixes a crash when opening Speech settings with Supertonic selected (the language list was the wrong type). Language list is now reported to NVDA correctly so automatic language switching works."""),
 	# Author(s)
 	addon_author="fastfinge",
 	# URL for the add-on documentation support

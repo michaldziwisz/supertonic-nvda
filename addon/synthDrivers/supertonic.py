@@ -422,7 +422,16 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 			self._language = voices.DEFAULT_LANGUAGE
 
 	def _get_availableLanguages(self):
-		return voices.available_locales()
+		# NVDA's settings GUI and languageIsSupported expect an OrderedDict of
+		# LanguageInfo keyed by language code (it calls .values() and iterates
+		# the codes through normalizeLanguage). Returning a raw set crashes the
+		# Speech Settings dialog and breaks automatic language switching.
+		from collections import OrderedDict
+
+		result = OrderedDict()
+		for code in sorted(voices.available_locales()):
+			result[code] = synthDriverHandler.LanguageInfo(code)
+		return result
 
 	def _get_rate(self):
 		return self._rate

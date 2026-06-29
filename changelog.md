@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.1
+
+- Fixed a crash when opening NVDA's Speech settings while Supertonic was the
+  active synthesizer. The list of available languages was returned as a plain
+  set, but NVDA expects an ordered mapping of language descriptions; this made
+  the settings dialog (and the synth settings ring language item) error out.
+- The language list is now reported to NVDA in the correct form, so automatic
+  language switching and the manual Language setting work as intended.
+
 ## 1.2.0
 
 - Switched to the multilingual **supertonic-3** model, adding support for 31
