@@ -359,3 +359,75 @@ def available_locales():
 	for ``languageIsSupported`` and to populate the manual Language setting.
 	"""
 	return set(SUPPORTED_LANGUAGES.keys())
+
+
+# ---------------------------------------------------------------------------
+# Number expansion
+# ---------------------------------------------------------------------------
+# The neural model reads bare digit sequences poorly, so we spell numbers out
+# into words (per language) before synthesis using the vendored ``num2words``.
+# Mapping from our supertonic language codes to num2words language codes.
+# Languages num2words cannot handle (bg, el, et, hi, hr) are intentionally
+# absent: their digits are left untouched (still spoken, just as raw digits).
+_NUM2WORDS_LANG = {
+	"en": "en", "ko": "ko", "ja": "ja", "ar": "ar", "cs": "cs", "da": "da",
+	"de": "de", "es": "es", "fi": "fi", "fr": "fr", "hu": "hu", "id": "id",
+	"it": "it", "lt": "lt", "lv": "lv", "nl": "nl", "pl": "pl", "pt": "pt",
+	"ro": "ro", "ru": "ru", "sk": "sk", "sl": "sl", "sv": "sv", "tr": "tr",
+	"uk": "uk", "vi": "vi",
+}
+
+# Match integers, optionally with thousands separators (space / NBSP / dot /
+# comma) and an optional decimal part. We keep this conservative so we only
+# touch clearly-numeric runs and leave codes/IDs mostly alone.
+_NUMBER_RE = None
+
+
+def _get_number_re():
+	global _NUMBER_RE
+	if _NUMBER_RE is None:
+		import re
+		# A run of digits possibly grouped, optional decimal fraction.
+		_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+	return _NUMBER_RE
+
+
+def expand_numbers(text, lang):
+	"""Spell out numbers in ``text`` using the language's number words.
+
+	``lang`` is a supertonic language code (e.g. ``"pl"``). For languages
+	num2words does not support, or on any conversion error, the original text is
+	returned unchanged so synthesis never breaks because of number handling.
+	"""
+	if not text:
+		return text
+	n2w_lang = _NUM2WORDS_LANG.get(lang)
+	if not n2w_lang:
+		return text
+	if not any(ch.isdigit() for ch in text):
+		return text
+	try:
+		from num2words import num2words
+	except Exception:
+		return text
+
+	def _replace(match):
+		token = match.group(0)
+		try:
+			if "." in token or "," in token:
+				# Treat a single comma/dot as a decimal separator.
+				normalized = token.replace(",", ".")
+				# Guard against multiple separators (e.g. thousands) -> skip.
+				if normalized.count(".") != 1:
+					return token
+				value = float(normalized)
+			else:
+				value = int(token)
+			return num2words(value, lang=n2w_lang)
+		except Exception:
+			return token
+
+	try:
+		return _get_number_re().sub(_replace, text)
+	except Exception:
+		return text

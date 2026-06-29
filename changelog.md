@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.0
+
+- Numbers are now expanded to words in the active language before synthesis,
+  because the neural model pronounces bare digit sequences poorly. For example
+  Polish "masz 5 nowych wiadomości" is now spoken "masz pięć nowych
+  wiadomości", and "2025" becomes "dwa tysiące dwadzieścia pięć".
+- Uses the bundled num2words library, covering 26 of the 31 model languages
+  (including Polish, Ukrainian, German, French, Russian…). The remaining five
+  (Bulgarian, Greek, Estonian, Hindi, Croatian) fall back to raw digits until
+  number words are available. Expansion follows the segment's language, so it
+  works with automatic language switching too.
+
 ## 1.2.2
 
 - Fixed garbled, sped-up "drunken" speech that occurred after the model was

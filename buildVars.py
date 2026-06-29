@@ -23,10 +23,10 @@ addon_info = AddonInfo(
 	# Translators: Long description to be shown for this add-on on add-on information from add-on store
 	addon_description=_("""A high-performance, on-device text-to-speech synthesizer driver for NVDA using the Supertonic engine."""),
 	# version
-	addon_version="1.2.2",
+	addon_version="1.3.0",
 	# Brief changelog for this version
 	# Translators: what's new content for the add-on version to be shown in the add-on store
-	addon_changelog=_("""Fixes garbled, sped-up speech caused by voices left over from the previous (English-only) model. Voices are now tagged with the model they belong to; voices from a different model are automatically discarded so they can be re-downloaded for the current multilingual model."""),
+	addon_changelog=_("""Numbers are now spoken as words in the current language (e.g. Polish "123" is read "sto dwadzieścia trzy") instead of being mangled by the model. Supported for 26 languages via the bundled num2words; the rest fall back to raw digits."""),
 	# Author(s)
 	addon_author="fastfinge",
 	# URL for the add-on documentation support

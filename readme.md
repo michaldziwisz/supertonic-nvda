@@ -25,6 +25,11 @@ Russian, Slovak, Slovenian, Swedish, Turkish, Ukrainian and Vietnamese.
 
 The same speaker voices speak in whichever language the text is in.
 
+Numbers are read as words in the active language (e.g. Polish "2025" is spoken
+"dwa tysiące dwadzieścia pięć"). This is available for 26 of the 31 languages;
+the remaining five (Bulgarian, Greek, Estonian, Hindi, Croatian) currently read
+digits as-is.
+
 - **Automatic language switching:** when NVDA's "Automatic language switching"
   option is enabled (Speech settings), each piece of text is spoken in its own
   language automatically.

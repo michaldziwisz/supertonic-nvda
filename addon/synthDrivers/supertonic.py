@@ -194,6 +194,21 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		Returns True if audio was fed to the player. Index notifications are
 		fired in sync with playback, mirroring the original single-segment path.
 		"""
+		# Spell numbers out into words before anything else, because the neural
+		# model reads bare digits poorly. This changes the text length, so we
+		# remap the index marks (caret/say-all positions) through the same
+		# difflib-based remap used for the other text transformations.
+		expanded_text = voices.expand_numbers(text, lang)
+		if expanded_text != text:
+			remap_expand = _build_remap(text, expanded_text)
+			remapped = []
+			for offset, idx in index_map:
+				if offset > len(text):
+					offset = len(text)
+				remapped.append((remap_expand[offset], idx))
+			index_map = remapped
+			text = expanded_text
+
 		# Sanitize text and remap indices to the filtered text.
 		filtered_chars = []
 		remap_filtered = [0] * (len(text) + 1)
