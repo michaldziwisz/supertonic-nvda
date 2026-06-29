@@ -63,8 +63,16 @@ pythonSources: list[str] = [
 	"addon/synthDrivers/models/**/*",
 ]
 
-# Files that contain strings for translation. Usually your python sources
-i18nSources: list[str] = pythonSources + ["buildVars.py"]
+# Files that contain strings for translation. Only this add-on's own sources
+# are scanned; the vendored third-party libraries under synthDrivers/libs and
+# the model files are intentionally excluded (they are not translatable, and
+# globbing them into xgettext overflows the command line).
+i18nSources: list[str] = [
+	"addon/synthDrivers/supertonic.py",
+	"addon/synthDrivers/_supertonicVoices.py",
+	"addon/globalPlugins/supertonic.py",
+	"buildVars.py",
+]
 
 # Files that will be ignored when building the nvda-addon file
 # Paths are relative to the addon directory, not to the root directory of your addon sources.
