@@ -3,7 +3,6 @@ import os
 import sys
 import threading
 import queue
-from pathlib import Path
 
 # Add the libs directory to sys.path so we can import supertonic and its dependencies
 libs_path = os.path.join(os.path.dirname(__file__), "libs")
@@ -19,6 +18,11 @@ from synthDriverHandler import synthIndexReached, synthDoneSpeaking
 from autoSettingsUtils.driverSetting import NumericDriverSetting
 from speech.commands import IndexCommand
 from supertonic.utils import chunk_text
+
+try:
+	from synthDrivers import _supertonicVoices as voices
+except ImportError:
+	import _supertonicVoices as voices
 
 def _build_remap(source_text, target_text):
 	remap = [0] * (len(source_text) + 1)
@@ -55,11 +59,16 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 
 	@classmethod
 	def check(cls):
-		return True
+		# Only advertise Supertonic as selectable when it can actually speak:
+		# the ONNX model must be present AND at least one voice must be installed.
+		# This prevents the user from ever switching (even accidentally, via the
+		# synth ring) to a Supertonic that has no usable voice.
+		return voices.is_ready()
 
 	def __init__(self):
 		super().__init__()
-		model_dir = Path(__file__).parent / "models"
+		# The ONNX model is bundled; voice styles live in the writable user dir.
+		model_dir = voices.get_bundle_model_dir()
 		try:
 			self._tts = supertonic.TTS(model_dir=model_dir, auto_download=False)
 		except Exception:
@@ -72,8 +81,9 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 			bitsPerSample=16
 		)
 		
-		# Initialize settings with defaults
-		self._voice = self._tts.voice_style_names[0] if self._tts.voice_style_names else "M1"
+		# Initialize settings with defaults from the installed (user) voices.
+		installed = voices.list_installed_voices()
+		self._voice = installed[0] if installed else "M1"
 		# Default speed is 1.05. 
 		# NVDA rate 27 maps to approx 1.05 with our mapping: 0.7 + (27/100)*1.3 = 1.051
 		self._rate = 27 
@@ -154,7 +164,20 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 			text = filtered_text
 			index_map = new_index_map
 
-			voice_style = self._tts.get_voice_style(voice_name)
+			# Load the requested voice from the user voices directory. If it has
+			# gone missing (e.g. deleted in the manager), fall back to any other
+			# installed voice; if none remain, abort cleanly.
+			voice_file = voices.voice_path(voice_name)
+			if not voice_file.exists():
+				installed = voices.list_installed_voices()
+				if not installed:
+					log.error("Supertonic: no voices installed; cannot synthesize")
+					synthDoneSpeaking.notify(synth=self)
+					return
+				voice_name = installed[0]
+				self._voice = voice_name
+				voice_file = voices.voice_path(voice_name)
+			voice_style = self._tts.get_voice_style_from_path(voice_file)
 			speed = 0.7 + (rate / 100.0) * (2.0 - 0.7)
 			
 			# Check cancellation before synthesis
@@ -309,16 +332,28 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		self._worker_thread.join()
 
 	def _get_availableVoices(self):
-		voices = {}
-		for name in self._tts.voice_style_names:
-			voices[name] = synthDriverHandler.VoiceInfo(name, name)
-		return voices
+		# Voices are the JSON style files installed in the user directory.
+		result = {}
+		for name in voices.list_installed_voices():
+			result[name] = synthDriverHandler.VoiceInfo(name, voices.voice_label(name))
+		return result
 
 	def _get_voice(self):
+		installed = voices.list_installed_voices()
+		# Keep the reported voice consistent with what is actually installed.
+		if self._voice not in installed and installed:
+			self._voice = installed[0]
 		return self._voice
 
 	def _set_voice(self, value):
-		self._voice = value
+		# Refuse to switch to a voice that is not installed; keep the current one
+		# (or fall back to the first installed voice) so we never end up pointing
+		# at a missing style file.
+		installed = voices.list_installed_voices()
+		if value in installed:
+			self._voice = value
+		elif self._voice not in installed and installed:
+			self._voice = installed[0]
 
 	def _get_rate(self):
 		return self._rate

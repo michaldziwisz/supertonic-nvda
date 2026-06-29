@@ -23,10 +23,10 @@ addon_info = AddonInfo(
 	# Translators: Long description to be shown for this add-on on add-on information from add-on store
 	addon_description=_("""A high-performance, on-device text-to-speech synthesizer driver for NVDA using the Supertonic engine."""),
 	# version
-	addon_version="1.0.0",
+	addon_version="1.1.0",
 	# Brief changelog for this version
 	# Translators: what's new content for the add-on version to be shown in the add-on store
-	addon_changelog=_("""Initial release of Supertonic TTS for NVDA."""),
+	addon_changelog=_("""Voices are now downloaded on demand instead of being bundled. Added a voice manager (NVDA Tools menu) to download, delete and switch official Supertonic voices. The synthesizer is only selectable once at least one voice is installed."""),
 	# Author(s)
 	addon_author="fastfinge",
 	# URL for the add-on documentation support
